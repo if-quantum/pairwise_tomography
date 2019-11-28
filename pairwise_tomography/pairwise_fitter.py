@@ -11,6 +11,10 @@ from qiskit.ignis.verification.tomography.basis.circuits import _format_register
 
 from qiskit.quantum_info.analysis.average import average_data
 
+_OBSERVABLE_FIRST = {'00': 1, '01': -1, '10': 1, '11': -1}
+_OBSERVABLE_SECOND = {'00': 1, '01': 1, '10': -1, '11': -1}
+_OBSERVABLE_CORRELATED = {'00': 1, '01': -1, '10': -1, '11': 1}
+
 class PairwiseStateTomographyFitter(StateTomographyFitter):
     """
     Pairwise Maximum-likelihood estimation state tomography fitter
@@ -36,7 +40,7 @@ class PairwiseStateTomographyFitter(StateTomographyFitter):
             meas_qubits = _format_registers(*measured_qubits)
         else:
             meas_qubits = _format_registers(measured_qubits)
-    
+
         self._qubit_list = meas_qubits
 
         self._meas_basis = None
@@ -45,20 +49,26 @@ class PairwiseStateTomographyFitter(StateTomographyFitter):
         super().set_preparation_basis("Pauli")
         self._data = {}
 
-    def fit(self, pairs_list=None, output='density_matrix', **kwargs):
+    def fit(self, method='auto', standard_weights=True, beta=0.5, **kwargs):
         """
         Reconstruct pairwise quantum states using CVXPY convex optimization.
 
         Args:
             pairs_list (list): A list of tuples containing the indices of the
                                qubit pairs for which to perform tomography
+            output (str): 'density_matrix' (default), for obtaining the density
+                          matrix, 'expectation' for the Pauli expectation values
             **kwargs (optional): kwargs for fitter method,
             see BaseTomographyFitter
 
         Returns:
-            A dictionary of the form {(i, j): rho(i,j)}, where rho(i,j) is the
-            two-qubit density matrix for qubits i, j
+            A dictionary of the form {(i, j): obj}, where 
+            obj = rho(i,j) is two-qubit density matrix for qubits i, j if 
+            output = 'density_matrix' (default). If output = 'expectation',
+            obj = {('X', 'X'): <XX>, ('X', 'Y'): <XY>, ...}, where <.> is the 
+            expectation value of the two-qubit operator.
         """
+        pairs_list = kwargs.get('pairs_list', None)
 
         # If no list of pairs provided, then evaluate for all qubit pairs
         if not pairs_list:
@@ -68,13 +78,24 @@ class PairwiseStateTomographyFitter(StateTomographyFitter):
         result = {}
 
         for p in pairs_list:
-            result[p] = self.fit_ij(*p, output=output, **kwargs)
+            result[p] = self._fit_ij(*p,
+                                    method=method,
+                                    standard_weights=standard_weights,
+                                    beta=beta,
+                                    **kwargs)
 
         return result
 
-    def fit_ij(self, i, j, output='density_matrix', **kwargs):
+    def _fit_ij(self, i, j, output='density_matrix', **kwargs):
         """
             Returns the tomographic reconstruction for the qubits i and j
+
+            Args:
+            i (int): first qubit
+            j (int): second qubit
+            output (str): 'density_matrix' (default) for returning density 
+                          matrix, 'expectation' for Pauli operators expectation
+                          values.
         """
         assert i != j, "i and j must be different"
 
@@ -102,25 +123,33 @@ class PairwiseStateTomographyFitter(StateTomographyFitter):
             # Populate the data
             self._data[tup] = counts
 
-        # Test that all the required measurements are there
+        # Check that all the required measurements are there
         expected_corr = product(['X', 'Y', 'Z'], ['X', 'Y', 'Z'])
         if set(self._data.keys()) != set(expected_corr):
             raise Exception("Could not find all the measurements required for tomography")
-        
-        if output=='density_matrix':
-        # Do the actual fit
+
+        if output == 'density_matrix':
+            # Do the actual fit using StateTomographyFitter base method
             result = super().fit(**kwargs)
-        elif output=='expectation':
+        elif output == 'expectation':
+            # Return the expectation values
             result = self._evaluate_expectation()
+        else:
+            raise ValueError("Output must be either 'density_matrix' or 'expectation'")
 
         # clear the _data field
         self._data = None
         return result
 
     def _evaluate_expectation(self):
-        observable_first = {'00': 1, '01': -1, '10': 1, '11': -1}
-        observable_second = {'00': 1, '01': 1, '10': -1, '11': -1}
-        observable_correlated = {'00': 1, '01': -1, '10': -1, '11': 1}
+        """
+        Utility function for evaluating expectation value of two-qubit Pauli
+        measurements.
+
+        Returns:
+            A dict where keys are pairs of Pauli operators, e.g. ('X', 'Z') 
+            or ('I', 'X'), and values are the expectation values.
+        """
 
         paulis = ['I', 'X', 'Y', 'Z']
         keys = product(paulis, paulis)
@@ -131,12 +160,12 @@ class PairwiseStateTomographyFitter(StateTomographyFitter):
                 if key[1] == 'I':
                     pass
                 else:
-                    result[key] = average_data(self._data[('Z', key[1])], observable_second)
+                    result[key] = average_data(self._data[('Z', key[1])], _OBSERVABLE_SECOND)
             elif key[1] == 'I':
-                result[key] = average_data(self._data[(key[0], 'Z')], observable_first)
+                result[key] = average_data(self._data[(key[0], 'Z')], _OBSERVABLE_FIRST)
             else:
-                result[key] = average_data(self._data[key], observable_correlated)
-        
+                result[key] = average_data(self._data[key], _OBSERVABLE_CORRELATED)
+
         return result
 
     def _find_layer(self, i, j):
