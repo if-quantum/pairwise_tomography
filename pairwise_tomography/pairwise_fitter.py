@@ -9,6 +9,8 @@ from qiskit.ignis.verification.tomography import StateTomographyFitter
 from qiskit.ignis.verification.tomography.data import marginal_counts
 from qiskit.ignis.verification.tomography.basis.circuits import _format_registers
 
+from qiskit.quantum_info.analysis.average import average_data
+
 class PairwiseStateTomographyFitter(StateTomographyFitter):
     """
     Pairwise Maximum-likelihood estimation state tomography fitter
@@ -43,7 +45,7 @@ class PairwiseStateTomographyFitter(StateTomographyFitter):
         super().set_preparation_basis("Pauli")
         self._data = {}
 
-    def fit(self, pairs_list=None, **kwargs):
+    def fit(self, pairs_list=None, output='density_matrix', **kwargs):
         """
         Reconstruct pairwise quantum states using CVXPY convex optimization.
 
@@ -66,11 +68,11 @@ class PairwiseStateTomographyFitter(StateTomographyFitter):
         result = {}
 
         for p in pairs_list:
-            result[p] = self.fit_ij(*p, **kwargs)
+            result[p] = self.fit_ij(*p, output=output, **kwargs)
 
         return result
 
-    def fit_ij(self, i, j, **kwargs):
+    def fit_ij(self, i, j, output='density_matrix', **kwargs):
         """
             Returns the tomographic reconstruction for the qubits i and j
         """
@@ -104,12 +106,37 @@ class PairwiseStateTomographyFitter(StateTomographyFitter):
         expected_corr = product(['X', 'Y', 'Z'], ['X', 'Y', 'Z'])
         if set(self._data.keys()) != set(expected_corr):
             raise Exception("Could not find all the measurements required for tomography")
-
+        
+        if output=='density_matrix':
         # Do the actual fit
-        result = super().fit(**kwargs)
+            result = super().fit(**kwargs)
+        elif output=='expectation':
+            result = self._evaluate_expectation()
 
         # clear the _data field
         self._data = None
+        return result
+
+    def _evaluate_expectation(self):
+        observable_first = {'00': 1, '01': -1, '10': 1, '11': -1}
+        observable_second = {'00': 1, '01': 1, '10': -1, '11': -1}
+        observable_correlated = {'00': 1, '01': -1, '10': -1, '11': 1}
+
+        paulis = ['I', 'X', 'Y', 'Z']
+        keys = product(paulis, paulis)
+
+        result = {}
+        for key in keys:
+            if key[0] == 'I':
+                if key[1] == 'I':
+                    pass
+                else:
+                    result[key] = average_data(self._data[('Z', key[1])], observable_second)
+            elif key[1] == 'I':
+                result[key] = average_data(self._data[(key[0], 'Z')], observable_first)
+            else:
+                result[key] = average_data(self._data[key], observable_correlated)
+        
         return result
 
     def _find_layer(self, i, j):
